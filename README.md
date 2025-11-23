@@ -2,6 +2,11 @@
 
 This project turns an **M5Stack Core2** into a cheap **Primary Flight Display (PFD)** / **EFIS-style attitude indicator** using only the built-in **MPU6886 IMU**(not verry accurate!!).
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/techniker/m5core2-ahrs/main/img/m5stackCore2_ahrs.jpeg" width="350" />
+</p>
+
+
 It shows:
 
 - Artificial horizon (sky/ground) with pitch ladder  

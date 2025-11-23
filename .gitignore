@@ -25,6 +25,7 @@ test
 # Default build and dependency folders
 build/
 libdeps/
+lib/
 tmp/
 *.log
 
