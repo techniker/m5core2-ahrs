@@ -3,17 +3,25 @@
  * Full-screen horizon with bottom compass/heading tape.
  * Bjoern Heller <tec att sixtopia.net>
  *
- * Features:)
+ * Features:
  * - Simple Kalman smoothing for pitch/roll/heading
- * - Artificial horizon
+ * - Artificial horizon (sky/brown ground)
  * - Pitch ladder
  * - Bank scale at top
- * - Slip/skid ball with simple mass-spring-damper physics
+ * - Slip/skid ball with mass-spring-damper physics
  * - Flight director crossbars
  * - Flight Path Vector bird using attitude + accelerometer data
  * - Heading tape at bottom + pitch/roll + battery Voltage
+ * - Airspeed tape (left)
+ * - Altitude tape (right)
+ * - Vertical speed indicator next to altitude tape
  *
- * Runs on a M5Stack Core2
+ * NOTE:
+ *  - Airspeed, altitude, vertical speed are exposed as variables
+ *    (g_airspeed, g_altitude, g_vspeed) and currently default to 0.
+ *    Hook them up to real sensors / data sources as needed.
+ *
+ * Runs on a M5Stack Core2 (Arduino / PlatformIO, M5Core2 library)
  */
 
 #include <M5Core2.h>
@@ -39,6 +47,11 @@ const int BOTTOM_BAND_H = 50;
 const int CX = INST_X + INST_W / 2;
 const int CY = INST_Y + INST_H / 2;
 
+// Tapes
+const int AIRSPEED_TAPE_W = 60;
+const int ALT_TAPE_W      = 60;
+const int VSI_W           = 24;  // width for vertical speed scale
+
 // ───────────────────────────────────────────────────────────
 // Colors
 // ───────────────────────────────────────────────────────────
@@ -62,6 +75,16 @@ const int   SLIP_BALL_RADIUS = 6;
 
 // Heading tape
 const float HEADING_PX_PER_DEG = 3.0f;
+
+// Airspeed tape scale (km/h or your chosen unit)
+const float AIRSPEED_PX_PER_UNIT = 0.6f;  // px per unit (e.g. km/h)
+
+// Altitude tape scale (metres)
+const float ALT_PX_PER_M = 0.08f;         // px per metre
+
+// Vertical speed scale (m/s)
+const float VS_PX_PER_MS = 10.0f;         // px per m/s
+const float VS_MAX_MS    = 10.0f;         // +/- 10 m/s visible
 
 // ───────────────────────────────────────────────────────────
 // Globals – attitude, offsets & physics
@@ -92,6 +115,11 @@ const unsigned long DRAW_INTERVAL_MS = 30;
 // Flight director command (demo: 5° nose up, 0° bank)
 float fd_pitch_cmd = 5.0f;
 float fd_roll_cmd  = 0.0f;
+
+// Airspeed, altitude, vertical speed – hook these to real sensors
+float g_airspeed = 0.0f;  // e.g. km/h
+float g_altitude = 0.0f;  // metres
+float g_vspeed   = 0.0f;  // m/s
 
 // ───────────────────────────────────────────────────────────
 // Simple 1D Kalman Filter for smoothing
@@ -149,10 +177,11 @@ void rotateAroundCenter(float x, float y, float rollRad, int &xo, int &yo) {
 
 // ───────────────────────────────────────────────────────────
 // Horizon + Pitch Ladder (full instrument area)
+// (Horizon rotation FIXED: tilts opposite to aircraft roll)
 // ───────────────────────────────────────────────────────────
 
 void drawHorizon(float pitchDeg, float rollDeg) {
-  // FIX: invert roll sign so horizon turns opposite to aircraft
+  // Use inverted roll to make horizon tilt opposite to aircraft
   float rollRad = deg2rad(-rollDeg);
 
   // Direction along horizon line
@@ -184,26 +213,28 @@ void drawHorizon(float pitchDeg, float rollDeg) {
   float grd2y = p2y - nY * Ln;
 
   // Fill sky & ground over whole instrument area
-  g_canvas.fillTriangle((int)p1x, (int)p1y, (int)p2x, (int)p2y, (int)sky1x, (int)sky1y, COLOR_SKY);
-  g_canvas.fillTriangle((int)p2x, (int)p2y, (int)sky2x, (int)sky2y, (int)sky1x, (int)sky1y, COLOR_SKY);
+  g_canvas.fillTriangle((int)p1x, (int)p1y, (int)p2x, (int)p2y,
+                        (int)sky1x, (int)sky1y, COLOR_SKY);
+  g_canvas.fillTriangle((int)p2x, (int)p2y, (int)sky2x, (int)sky2y,
+                        (int)sky1x, (int)sky1y, COLOR_SKY);
 
-  g_canvas.fillTriangle((int)p1x, (int)p1y, (int)p2x, (int)p2y, (int)grd1x, (int)grd1y, COLOR_GND);
-  g_canvas.fillTriangle((int)p2x, (int)p2y, (int)grd2x, (int)grd2y, (int)grd1x, (int)grd1y, COLOR_GND);
+  g_canvas.fillTriangle((int)p1x, (int)p1y, (int)p2x, (int)p2y,
+                        (int)grd1x, (int)grd1y, COLOR_GND);
+  g_canvas.fillTriangle((int)p2x, (int)p2y, (int)grd2x, (int)grd2y,
+                        (int)grd1x, (int)grd1y, COLOR_GND);
 
-  // Helper for ladder
-  auto rot = [&](float x, float y) -> std::pair<int,int> {
-    int xo, yo;
+  auto rot = [&](float x, float y, int &xo, int &yo) {
     rotateAroundCenter(x, y, rollRad, xo, yo);
-    return { xo, yo };
   };
 
   // Zero pitch line
   {
     float yZero = CY + (pitchDeg - 0.0f) * PITCH_PIX_PER_DEG;
-    auto zL = rot(CX - 80, yZero);
-    auto zR = rot(CX + 80, yZero);
-    g_canvas.drawLine(zL.first, zL.second, zR.first, zR.second, TFT_WHITE);
-    g_canvas.drawLine(zL.first, zL.second + 1, zR.first, zR.second + 1, TFT_WHITE);
+    int x1, y1, x2, y2;
+    rot(CX - 80, yZero, x1, y1);
+    rot(CX + 80, yZero, x2, y2);
+    g_canvas.drawLine(x1, y1, x2, y2, TFT_WHITE);
+    g_canvas.drawLine(x1, y1 + 1, x2, y2 + 1, TFT_WHITE);
   }
 
   // Pitch ladder
@@ -213,22 +244,22 @@ void drawHorizon(float pitchDeg, float rollDeg) {
     float y = CY + deltaPitch * PITCH_PIX_PER_DEG;
     if (y < INST_Y - 40 || y > INST_Y + INST_H + 40) continue;
 
-    auto pL = rot(CX - 40, y);
-    auto pR = rot(CX + 40, y);
-    g_canvas.drawLine(pL.first, pL.second, pR.first, pR.second, TFT_WHITE);
+    int xL, yL, xR, yR;
+    rot(CX - 40, y, xL, yL);
+    rot(CX + 40, y, xR, yR);
+    g_canvas.drawLine(xL, yL, xR, yR, TFT_WHITE);
 
     if (mark % 10 == 0) {
-      auto pLL = rot(CX - 55, y);
-      auto pRR = rot(CX + 55, y);
-      g_canvas.drawLine(pLL.first, pLL.second, pRR.first, pRR.second, TFT_WHITE);
+      int xLL, yLL, xRR, yRR;
+      rot(CX - 55, y, xLL, yLL);
+      rot(CX + 55, y, xRR, yRR);
+      g_canvas.drawLine(xLL, yLL, xRR, yRR, TFT_WHITE);
 
       char buf[8];
       snprintf(buf, sizeof(buf), "%+d", -mark);
-      int tx = pRR.first + 4;
-      int ty = pRR.second - 4;
       g_canvas.setTextColor(COLOR_TEXT, COLOR_SKY);
       g_canvas.setTextSize(1);
-      g_canvas.setCursor(tx, ty);
+      g_canvas.setCursor(xRR + 4, yRR - 4);
       g_canvas.print(buf);
     }
   }
@@ -243,6 +274,7 @@ void drawHorizon(float pitchDeg, float rollDeg) {
 
 // ───────────────────────────────────────────────────────────
 // Bank Scale (semi-circle at top)
+// (Pointer rotation consistent with roll direction)
 // ───────────────────────────────────────────────────────────
 
 void drawBankScale(float rollDeg) {
@@ -268,7 +300,7 @@ void drawBankScale(float rollDeg) {
   int pY1 = centerY - radiusOuter - 2;
   g_canvas.fillTriangle(pX1 - 6, pY1, pX1 + 6, pY1, pX1, pY1 - 8, TFT_ORANGE);
 
-  // Moving bank index
+  // Moving bank index (same sign as rollDeg)
   float bankRad = deg2rad(rollDeg - 90);
   int indX = centerX + (int)(radiusInner * cos(bankRad));
   int indY = centerY + (int)(radiusInner * sin(bankRad));
@@ -287,7 +319,7 @@ void updateAndDrawSlip(float ay, float az, float dt) {
                     barCenterY - 15,
                     SLIP_BAR_WIDTH + 20,
                     30,
-                    COLOR_GND);  // choose something that blends well
+                    COLOR_GND);
 
   g_canvas.drawRect(barCenterX - SLIP_BAR_WIDTH/2,
                     barCenterY - SLIP_BAR_HEIGHT/2,
@@ -342,14 +374,14 @@ void drawFlightDirector(float dispPitch, float dispRoll) {
 }
 
 // ───────────────────────────────────────────────────────────
-// Flight Path Vector (“bird”)
+// Flight Path Vector (“bird”) – roll-consistent, horizon-aligned
 // ───────────────────────────────────────────────────────────
 
 void drawFlightPathVector(float dispPitch, float dispRoll, float ax, float ay) {
   float fpvPitch = dispPitch - ax * 5.0f;
   float fpvRoll  = dispRoll  + ay * 5.0f;
 
-  // FIX: use inverted roll for rotation here too
+  // Use same roll sign convention as horizon
   float rollRad = deg2rad(-dispRoll);
 
   float yUnrolled = CY + fpvPitch * PITCH_PIX_PER_DEG;
@@ -364,7 +396,183 @@ void drawFlightPathVector(float dispPitch, float dispRoll, float ax, float ay) {
 }
 
 // ───────────────────────────────────────────────────────────
+// Airspeed Tape (left)
+// ───────────────────────────────────────────────────────────
+
+void drawAirspeedTape(float airspeed) {
+  int tapeX = 0;
+  int tapeY = 0;
+  int tapeW = AIRSPEED_TAPE_W;
+  int tapeH = INST_H;
+
+  // Background
+  g_canvas.fillRect(tapeX, tapeY, tapeW, tapeH, COLOR_PANEL);
+  g_canvas.drawRect(tapeX, tapeY, tapeW, tapeH, TFT_DARKGREY);
+
+  // Visible speed span
+  float spanUnits = (float)tapeH / AIRSPEED_PX_PER_UNIT / 2.0f;
+
+  // Ticks
+  for (int v = (int)(airspeed - spanUnits); v <= (int)(airspeed + spanUnits); v += 5) {
+    float dy = (v - airspeed) * AIRSPEED_PX_PER_UNIT;
+    int y = (int)(CY + dy);
+    if (y < tapeY + 5 || y > tapeY + tapeH - 5) continue;
+
+    bool major = (v % 10 == 0);
+    int len = major ? 12 : 6;
+    int x1 = tapeX + tapeW - len;
+    int x2 = tapeX + tapeW - 2;
+
+    g_canvas.drawLine(x1, y, x2, y, TFT_WHITE);
+
+    if (major) {
+      char buf[8];
+      snprintf(buf, sizeof(buf), "%d", v);
+      g_canvas.setTextColor(COLOR_TEXT, COLOR_PANEL);
+      g_canvas.setTextSize(1);
+      g_canvas.setCursor(tapeX + 4, y - 4);
+      g_canvas.print(buf);
+    }
+  }
+
+  // Current value "window"
+  int winH = 30;
+  int winY = CY - winH / 2;
+  g_canvas.fillRect(tapeX + 2, winY, tapeW - 4, winH, TFT_BLACK);
+  g_canvas.drawRect(tapeX + 2, winY, tapeW - 4, winH, TFT_WHITE);
+
+  char buf[10];
+  snprintf(buf, sizeof(buf), "%3.0f", airspeed);
+  g_canvas.setTextColor(COLOR_TEXT, TFT_BLACK);
+  g_canvas.setTextSize(2);
+  g_canvas.setCursor(tapeX + 6, winY + 6);
+  g_canvas.print(buf);
+
+  // Unit (metric)
+  g_canvas.setTextSize(1);
+  g_canvas.setCursor(tapeX + 6, winY + winH + 2);
+  g_canvas.print("km/h");
+}
+
+// ───────────────────────────────────────────────────────────
+// Altitude Tape + Vertical Speed Indicator (right)
+// ───────────────────────────────────────────────────────────
+
+void drawAltitudeTapeAndVSI(float altitude, float vspeed) {
+  int tapeX = TFT_W - ALT_TAPE_W - VSI_W;
+  int tapeY = 0;
+  int tapeW = ALT_TAPE_W;
+  int tapeH = INST_H;
+
+  // Altitude background
+  g_canvas.fillRect(tapeX, tapeY, tapeW, tapeH, COLOR_PANEL);
+  g_canvas.drawRect(tapeX, tapeY, tapeW, tapeH, TFT_DARKGREY);
+
+  // Visible altitude span
+  float spanM = (float)tapeH / ALT_PX_PER_M / 2.0f;
+
+  // Ticks every 20 m, labels every 100 m
+  for (int h = (int)(altitude - spanM); h <= (int)(altitude + spanM); h += 20) {
+    float dy = (h - altitude) * ALT_PX_PER_M;
+    int y = (int)(CY + dy);
+    if (y < tapeY + 5 || y > tapeY + tapeH - 5) continue;
+
+    bool major = (h % 100 == 0);
+    int len = major ? 12 : 6;
+    int x1 = tapeX + 2;
+    int x2 = tapeX + 2 + len;
+
+    g_canvas.drawLine(x1, y, x2, y, TFT_WHITE);
+
+    if (major) {
+      char buf[10];
+      snprintf(buf, sizeof(buf), "%d", h);
+      g_canvas.setTextColor(COLOR_TEXT, COLOR_PANEL);
+      g_canvas.setTextSize(1);
+      g_canvas.setCursor(x2 + 2, y - 4);
+      g_canvas.print(buf);
+    }
+  }
+
+  // Current altitude "window"
+  int winH = 30;
+  int winY = CY - winH / 2;
+  g_canvas.fillRect(tapeX + 2, winY, tapeW - 4, winH, TFT_BLACK);
+  g_canvas.drawRect(tapeX + 2, winY, tapeW - 4, winH, TFT_WHITE);
+
+  char buf[10];
+  snprintf(buf, sizeof(buf), "%5.0f", altitude);
+  g_canvas.setTextColor(COLOR_TEXT, TFT_BLACK);
+  g_canvas.setTextSize(2);
+  g_canvas.setCursor(tapeX + 4, winY + 6);
+  g_canvas.print(buf);
+
+  // Unit (metric)
+  g_canvas.setTextSize(1);
+  g_canvas.setCursor(tapeX + 4, winY + winH + 2);
+  g_canvas.print("m");
+
+  // ── Vertical Speed Indicator (right of altitude) ──
+  int vsiX = tapeX + tapeW;
+  int vsiY = 0;
+  int vsiW = VSI_W;
+  int vsiH = INST_H;
+
+  g_canvas.fillRect(vsiX, vsiY, vsiW, vsiH, COLOR_PANEL);
+  g_canvas.drawRect(vsiX, vsiY, vsiW, vsiH, TFT_DARKGREY);
+
+  int centerY = CY;
+
+  // VS zero line
+  g_canvas.drawLine(vsiX + vsiW / 2, vsiY + 5, vsiX + vsiW / 2, vsiY + vsiH - 5, TFT_DARKGREY);
+
+  // VS ticks (m/s)
+  for (int v = -(int)VS_MAX_MS; v <= (int)VS_MAX_MS; v += 2) {
+    float dy = (v)*VS_PX_PER_MS;
+    int y = (int)(centerY - dy);
+    if (y < vsiY + 5 || y > vsiY + vsiH - 5) continue;
+
+    bool major = (v % 4 == 0);
+    int len = major ? 10 : 6;
+    int x1 = vsiX + vsiW / 2 - len / 2;
+    int x2 = vsiX + vsiW / 2 + len / 2;
+
+    g_canvas.drawLine(x1, y, x2, y, TFT_WHITE);
+
+    if (major && v != 0) {
+      char vbuf[8];
+      snprintf(vbuf, sizeof(vbuf), "%+d", v);
+      g_canvas.setTextColor(COLOR_TEXT, COLOR_PANEL);
+      g_canvas.setTextSize(1);
+      g_canvas.setCursor(vsiX + 2, y - 4);
+      g_canvas.print(vbuf);
+    }
+  }
+
+  // VS pointer (green bar)
+  if (vspeed > VS_MAX_MS) vspeed = VS_MAX_MS;
+  if (vspeed < -VS_MAX_MS) vspeed = -VS_MAX_MS;
+
+  int yPtr = (int)(centerY - vspeed * VS_PX_PER_MS);
+  if (yPtr < vsiY + 5) yPtr = vsiY + 5;
+  if (yPtr > vsiY + vsiH - 5) yPtr = vsiY + vsiH - 5;
+
+  g_canvas.fillRect(vsiX + 3, yPtr - 3, vsiW - 6, 6, TFT_GREEN);
+
+  // VS numeric (m/s) at top of VSI
+  char vsbuf[10];
+  snprintf(vsbuf, sizeof(vsbuf), "%+4.1f", vspeed);
+  g_canvas.setTextColor(COLOR_TEXT, COLOR_PANEL);
+  g_canvas.setTextSize(1);
+  g_canvas.setCursor(vsiX + 2, vsiY + 4);
+  g_canvas.print(vsbuf);
+  g_canvas.setCursor(vsiX + 2, vsiY + 16);
+  g_canvas.print("m/s");
+}
+
+// ───────────────────────────────────────────────────────────
 // Heading Tape + Bottom Info
+// (Heading + FD alignment preserved)
 // ───────────────────────────────────────────────────────────
 
 void drawHeadingTapeAndInfo(float yawDeg, float dispPitch, float dispRoll) {
@@ -456,7 +664,7 @@ void loop() {
   float pitchRaw, rollRaw, yawRaw;
   M5.IMU.getAhrsData(&pitchRaw, &rollRaw, &yawRaw);
 
-  // On your Core2 pitch/roll were swapped:
+  // On Core2 these are often swapped vs. expectation:
   g_pitch_raw = rollRaw;
   g_roll_raw  = pitchRaw;
   g_yaw_raw   = yawRaw;
@@ -474,6 +682,9 @@ void loop() {
 
   float ax, ay, az;
   M5.IMU.getAccelData(&ax, &ay, &az);
+
+  // (Optional) derive vspeed crudely from az or external sensor and assign g_vspeed here.
+  // (Optional) set g_airspeed / g_altitude from external inputs.
 
   if (now - lastDrawMs >= DRAW_INTERVAL_MS) {
     lastDrawMs = now;
@@ -502,6 +713,12 @@ void loop() {
 
     // Slip/skid ball
     updateAndDrawSlip(ay, az, dt);
+
+    // Airspeed tape (left)
+    drawAirspeedTape(g_airspeed);
+
+    // Altitude tape + VSI (right)
+    drawAltitudeTapeAndVSI(g_altitude, g_vspeed);
 
     // Heading tape + info band
     drawHeadingTapeAndInfo(dispYaw, dispPitch, dispRoll);
