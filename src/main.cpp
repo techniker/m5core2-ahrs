@@ -152,7 +152,8 @@ void rotateAroundCenter(float x, float y, float rollRad, int &xo, int &yo) {
 // ───────────────────────────────────────────────────────────
 
 void drawHorizon(float pitchDeg, float rollDeg) {
-  float rollRad = deg2rad(rollDeg);
+  // FIX: invert roll sign so horizon turns opposite to aircraft
+  float rollRad = deg2rad(-rollDeg);
 
   // Direction along horizon line
   float dX = cos(rollRad);
@@ -348,7 +349,9 @@ void drawFlightPathVector(float dispPitch, float dispRoll, float ax, float ay) {
   float fpvPitch = dispPitch - ax * 5.0f;
   float fpvRoll  = dispRoll  + ay * 5.0f;
 
-  float rollRad = deg2rad(dispRoll);
+  // FIX: use inverted roll for rotation here too
+  float rollRad = deg2rad(-dispRoll);
+
   float yUnrolled = CY + fpvPitch * PITCH_PIX_PER_DEG;
 
   int fx, fy;
