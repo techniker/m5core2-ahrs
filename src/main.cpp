@@ -152,7 +152,7 @@ void rotateAroundCenter(float x, float y, float rollRad, int &xo, int &yo) {
 // ───────────────────────────────────────────────────────────
 
 void drawHorizon(float pitchDeg, float rollDeg) {
-  // FIX: invert roll sign so horizon turns opposite to aircraft
+  // Invert roll sign so horizon turns opposite to aircraft
   float rollRad = deg2rad(-rollDeg);
 
   // Direction along horizon line
@@ -184,11 +184,15 @@ void drawHorizon(float pitchDeg, float rollDeg) {
   float grd2y = p2y - nY * Ln;
 
   // Fill sky & ground over whole instrument area
-  g_canvas.fillTriangle((int)p1x, (int)p1y, (int)p2x, (int)p2y, (int)sky1x, (int)sky1y, COLOR_SKY);
-  g_canvas.fillTriangle((int)p2x, (int)p2y, (int)sky2x, (int)sky2y, (int)sky1x, (int)sky1y, COLOR_SKY);
+  g_canvas.fillTriangle((int)p1x, (int)p1y, (int)p2x, (int)p2y,
+                        (int)sky1x, (int)sky1y, COLOR_SKY);
+  g_canvas.fillTriangle((int)p2x, (int)p2y, (int)sky2x, (int)sky2y,
+                        (int)sky1x, (int)sky1y, COLOR_SKY);
 
-  g_canvas.fillTriangle((int)p1x, (int)p1y, (int)p2x, (int)p2y, (int)grd1x, (int)grd1y, COLOR_GND);
-  g_canvas.fillTriangle((int)p2x, (int)p2y, (int)grd2x, (int)grd2y, (int)grd1x, (int)grd1y, COLOR_GND);
+  g_canvas.fillTriangle((int)p1x, (int)p1y, (int)p2x, (int)p2y,
+                        (int)grd1x, (int)grd1y, COLOR_GND);
+  g_canvas.fillTriangle((int)p2x, (int)p2y, (int)grd2x, (int)grd2y,
+                        (int)grd1x, (int)grd1y, COLOR_GND);
 
   // Helper for ladder
   auto rot = [&](float x, float y) -> std::pair<int,int> {
@@ -276,18 +280,15 @@ void drawBankScale(float rollDeg) {
 }
 
 // ───────────────────────────────────────────────────────────
-// Slip / Skid Ball – physics
+// Slip / Skid Ball – physics (fixed direction + no brown block)
 // ───────────────────────────────────────────────────────────
 
 void updateAndDrawSlip(float ay, float az, float dt) {
   int barCenterX = CX;
   int barCenterY = INST_Y + INST_H - 25;
 
-  g_canvas.fillRect(barCenterX - SLIP_BAR_WIDTH/2 - 10,
-                    barCenterY - 15,
-                    SLIP_BAR_WIDTH + 20,
-                    30,
-                    COLOR_GND);  // choose something that blends well
+  // Removed background fill to keep horizon visible
+  // g_canvas.fillRect(..., COLOR_GND);
 
   g_canvas.drawRect(barCenterX - SLIP_BAR_WIDTH/2,
                     barCenterY - SLIP_BAR_HEIGHT/2,
@@ -295,8 +296,9 @@ void updateAndDrawSlip(float ay, float az, float dt) {
                     SLIP_BAR_HEIGHT,
                     TFT_WHITE);
 
-  float angle = atan2f(ay, az);
-  if (angle > 0.5f) angle = 0.5f;
+  // Invert ay so ball moves to the correct side
+  float angle = atan2f(-ay, az);
+  if (angle > 0.5f)  angle = 0.5f;
   if (angle < -0.5f) angle = -0.5f;
 
   float targetPos = angle / 0.5f * (SLIP_BAR_WIDTH/2 - SLIP_BALL_RADIUS);
@@ -342,21 +344,38 @@ void drawFlightDirector(float dispPitch, float dispRoll) {
 }
 
 // ───────────────────────────────────────────────────────────
-// Flight Path Vector (“bird”)
+// Flight Path Vector (“bird”) – improved
 // ───────────────────────────────────────────────────────────
+// ax: forward/back, ay: lateral, az: vertical (as used in slip)
 
-void drawFlightPathVector(float dispPitch, float dispRoll, float ax, float ay) {
-  float fpvPitch = dispPitch - ax * 5.0f;
-  float fpvRoll  = dispRoll  + ay * 5.0f;
+void drawFlightPathVector(float dispPitch, float dispRoll,
+                          float ax, float ay, float az) {
+  // Estimate total accel magnitude (for normalization)
+  float g_est = sqrtf(ax * ax + ay * ay + az * az);
+  if (g_est < 0.1f) g_est = 0.1f;  // avoid div by zero
 
-  // FIX: use inverted roll for rotation here too
+  // Heuristic:
+  //  - Forward accel (ax) -> FPV below/above nose (pitch offset)
+  //  - Lateral accel (ay) -> FPV left/right (lateral offset)
+  //
+  // At rest (ax≈0, ay≈0) FPV ≈ dispPitch, centered laterally.
+
+  float fpaOffsetDeg      = -(ax / g_est) * 20.0f;   // tune gain as desired
+  float lateralOffsetDeg  =  (ay / g_est) * 20.0f;   // left/right
+
+  float fpvPitchDeg = dispPitch + fpaOffsetDeg;
+
+  // Unrolled coordinates in instrument frame
+  float xUnrolled = CX + lateralOffsetDeg * (INST_W / 90.0f);
+  float yUnrolled = CY + fpvPitchDeg * PITCH_PIX_PER_DEG;
+
+  // Use same inverted roll as the horizon so FPV stays in sky frame
   float rollRad = deg2rad(-dispRoll);
 
-  float yUnrolled = CY + fpvPitch * PITCH_PIX_PER_DEG;
-
   int fx, fy;
-  rotateAroundCenter(CX, yUnrolled, rollRad, fx, fy);
+  rotateAroundCenter(xUnrolled, yUnrolled, rollRad, fx, fy);
 
+  // Draw bird symbol
   g_canvas.fillCircle(fx, fy, 4, COLOR_FPV);
   g_canvas.drawLine(fx - 14, fy,      fx - 3, fy,      COLOR_FPV);
   g_canvas.drawLine(fx + 3,  fy,      fx + 14, fy,      COLOR_FPV);
@@ -497,8 +516,8 @@ void loop() {
     // Flight director
     drawFlightDirector(dispPitch, dispRoll);
 
-    // Flight path vector (bird)
-    drawFlightPathVector(dispPitch, dispRoll, ax, ay);
+    // Flight path vector (bird) – improved
+    drawFlightPathVector(dispPitch, dispRoll, ax, ay, az);
 
     // Slip/skid ball
     updateAndDrawSlip(ay, az, dt);
